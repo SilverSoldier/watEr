@@ -3,8 +3,6 @@
 -include_lib("eunit/include/eunit.hrl").
 
 
-Cc:  <>
-
 %% In this assignment, we're going to be implmenting part of the Raft
 %% algorithm - a distributed consensus algorithm, designed
 %% to be simpler to understand than the more complex Paxos algorithm.
@@ -39,32 +37,40 @@ Cc:  <>
 % registered processes:
 % http://www.erlang.org/doc/reference_manual/processes.html
 
-raft_peer(Log) ->
+-record(peer, {log = [], term = 0, commit = 0}).
+
+raft_peer(State) ->
 	receive
 		{append_log, Num, Something} ->
-			raft_peer(lists:append(Log, [{Num, Something}]));
+			raft_peer(State#peer{log = lists:append(State#peer.log, [{Num, Something}])});
 		{get_log, Pid} ->
-			Pid ! Log,
-	        raft_peer(Log);
+			Pid ! State#peer.log,
+	        raft_peer(State);
 		disable_member ->
-	        raft_peer_disabled(Log);
+	        raft_peer_disabled(State);
+		{get_term, Pid} ->
+			Pid ! State#peer.term,
+			raft_peer(State);
+		{get_commit_index, Pid} ->
+			Pid ! State#peer.commit,
+			raft_peer(State);
 		_ ->
-			raft_peer(Log)
+			raft_peer(State)
 						
 	end.
 
-raft_peer_disabled(Log) ->
+raft_peer_disabled(State) ->
 	receive
 		enable_member ->
-			raft_peer(Log);
+			raft_peer(State);
 		_ ->
-			raft_peer_disabled(Log)
+			raft_peer_disabled(State)
 	end.
 
 
 start_raft_member(UniqueId) ->
 	% spawning and registering process
-	register(UniqueId, spawn(raft, raft_peer, [[]])).
+	register(UniqueId, spawn(raft, raft_peer, [#peer{}])).
 
 
 % THE TESTME Function sets up a test with a running raft member
@@ -112,7 +118,7 @@ append_log(Id,Num,Something) ->
 
 get_log(Id) ->
 	Id ! {get_log, self()},
-	Return=receive
+	receive
 		Log ->
 			Log
 	end.
