@@ -46,14 +46,20 @@ raft_peer(State) ->
 		{get_log, Pid} ->
 			Pid ! State#peer.log,
 	        raft_peer(State);
+		{set_log, NewLog} ->
+			raft_peer(State#peer{log = NewLog});
 		disable_member ->
 	        raft_peer_disabled(State);
 		{get_term, Pid} ->
 			Pid ! State#peer.term,
 			raft_peer(State);
+		{set_term, NewTerm} ->
+			raft_peer(State#peer{term=NewTerm});
 		{get_commit_index, Pid} ->
 			Pid ! State#peer.commit,
 			raft_peer(State);
+		{set_commit_index, NewCommitIndex} ->
+			raft_peer(State#peer{commit=NewCommitIndex});
 		_ ->
 			raft_peer(State)
 						
@@ -189,17 +195,26 @@ get_enable_disable_test_() ->
 % in the Raft protocol.
 
 get_term(Id) ->
-    solveme.
+	Id ! {get_term, self()},
+	receive
+		Term ->
+			Term
+	end.
+			
 
 get_commit_index(Id) ->
-    solveme.
+	Id ! {get_commit_index, self()},
+	receive
+		Ci ->
+			Ci
+	end.
 
 
-%% get_term_and_ci_test_() ->
-%%     testme(?_test([
-%%                    ?assertEqual(0,get_term(raft1)),
-%%                    ?assertEqual(0,get_commit_index(raft1))
-%%              ])).
+get_term_and_ci_test_() ->
+    testme(?_test([
+                   ?assertEqual(0,get_term(raft1)),
+                   ?assertEqual(0,get_commit_index(raft1))
+             ])).
 
 % Now our first real request, append entries.  This is a good one to
 % start with, because it's the protocol designed to update a member
@@ -222,72 +237,115 @@ append_entries(Id,
                PrevLogTerm,
                Entries, % these will be of the form {Term,data} because you can get data from other terms
                LeaderCommit) ->
-    solveme.
+	CurrentTerm = get_term(Id),
+	if 
+		Term < CurrentTerm ->
+			{CurrentTerm, false};
+	    true ->
+			% Update term irrespective of other things
+			Id ! {set_term, Term},
+			Log = get_log(Id),
+			if 
+				length(Log) < PrevLogIndex ->
+					% If log does not contain an entry at PrevLogIndex
+					{Term, false};
+				true ->
+					if 
+						Log /= [] ->
+							{PrevTermActual, _} = lists:nth(PrevLogIndex, Log),
+							if 
+								PrevTermActual /= PrevLogTerm ->
+									Return = false;
+								true ->
+									Return = true
+							end;
+						true ->
+							Return = true
+					end,
+					if
+						Return == true ->
+							lists:foreach(fun({X, Y}) ->
+													append_log(Id, X, Y) end, Entries),
+							% If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, indexOfLastEntry)
+							Commit_index = get_commit_index(Id),
+							if
+								LeaderCommit > Commit_index ->
+									Id ! {set_commit_index, (min(LeaderCommit, length(Log) + length(Entries)))};
+								true ->
+									nil
+							end,
+							{Term, true};
+						true ->
+							{Term, false}
+					end
+			end
+	end.
 
 
-%% % case 1: term is higher, prevs match, so data is added
-%% ae1_test_() ->
-%%     testme(?_test([
-%%                    ?assertEqual(0,get_term(raft1)),
-%%                    ?assertEqual(0,get_commit_index(raft1)),
-%%                    append_entries(raft1,1,0,0,[{1,newdata}],0),
-%%                    ?assertEqual(1,get_term(raft1)),
-%%                    ?assertEqual(0,get_commit_index(raft1)),
-%%                    ?assertEqual([{1,newdata}],get_log(raft1))                   
-%%              ])).
+% case 1: term is higher, prevs match, so data is added
+ae1_test_() ->
+    testme(?_test([
+                   ?assertEqual(0,get_term(raft1)),
+                   ?assertEqual(0,get_commit_index(raft1)),
+                   append_entries(raft1,1,0,0,[{1,newdata}],0),
+                   ?assertEqual(1,get_term(raft1)),
+                   ?assertEqual(0,get_commit_index(raft1)),
+                   ?assertEqual([{1,newdata}],get_log(raft1))                   
+             ])).
 
-%% % case 2: same as 1, plus followup with a commit
-%% ae2_test_() ->
-%%     testme(?_test([
-%%                    append_entries(raft1,1,0,0,[{1,newdata}],0),
-%%                    ?assertEqual(1,get_term(raft1)),
-%%                    ?assertEqual(0,get_commit_index(raft1)),
-%%                    ?assertEqual([{1,newdata}],get_log(raft1)),
-%%                    append_entries(raft1,1,1,1,[],1),
-%%                    ?assertEqual(1,get_term(raft1)),
-%%                    ?assertEqual(1,get_commit_index(raft1)),
-%%                    ?assertEqual([{1,newdata}],get_log(raft1))                   
-%%              ])).
+% case 2: same as 1, plus followup with a commit
+ae2_test_() ->
+    testme(?_test([
+                   append_entries(raft1,1,0,0,[{1,newdata}],0),
+                   ?assertEqual(1,get_term(raft1)),
+                   ?assertEqual(0,get_commit_index(raft1)),
+                   ?assertEqual([{1,newdata}],get_log(raft1)),
+                   append_entries(raft1,1,1,1,[],1),
+                   ?assertEqual(1,get_term(raft1)),
+                   ?assertEqual(1,get_commit_index(raft1)),
+                   ?assertEqual([{1,newdata}],get_log(raft1))                   
+             ])).
 
-%% % case 3: 2 different data in 2 different terms
-%% ae3_test_() ->
-%%     testme(?_test([
-%%                    append_entries(raft1,1,0,0,[{1,newdata}],0),
-%%                    ?assertEqual(1,get_term(raft1)),
-%%                    ?assertEqual(0,get_commit_index(raft1)),
-%%                    ?assertEqual([{1,newdata}],get_log(raft1)),
-%%                    append_entries(raft1,2,1,1,[{2,newdata2}],0),
-%%                    ?assertEqual(2,get_term(raft1)),
-%%                    ?assertEqual(0,get_commit_index(raft1)),
-%%                    ?assertEqual([{1,newdata},{2,newdata2}],get_log(raft1))                   
-%%              ])).
+% case 3: 2 different data in 2 different terms
+ae3_test_() ->
+    testme(?_test([
+                   ?assertEqual({1, true}, append_entries(raft1,1,0,0,[{1,newdata}],0)),
+                   ?assertEqual(1,get_term(raft1)),
+                   ?assertEqual(0,get_commit_index(raft1)),
+                   ?assertEqual([{1,newdata}],get_log(raft1)),
+                   append_entries(raft1,2,1,1,[{2,newdata2}],0),
+                   ?assertEqual(2,get_term(raft1)),
+                   ?assertEqual(0,get_commit_index(raft1)),
+                   ?assertEqual([{1,newdata},{2,newdata2}],get_log(raft1)) 
+             ])).
 
-%% % case 4: 2 different data but second is ignored because it comes in an earlier term
-%% % also in this test we check the return results of append_entries
-%% ae4_test_() ->
-%%     testme(?_test([
-%%                    ?assertEqual({1,true},append_entries(raft1,1,0,0,[{1,newdata}],0)),
-%%                    ?assertEqual({2,true},append_entries(raft1,2,1,1,[{2,newdata2}],0)),
-%%                    ?assertEqual(2,get_term(raft1)),
-%%                    ?assertEqual([{1,newdata},{2,newdata2}],get_log(raft1)),
-%%                    ?assertEqual({2,false},append_entries(raft1,1,1,1,[{1,otherdata}],0)),
-%%                    ?assertEqual(2,get_term(raft1)),
-%%                    ?assertEqual([{1,newdata},{2,newdata2}],get_log(raft1))
-%%              ])).
+% case 4: 2 different data but second is ignored because it comes in an earlier term
+% also in this test we check the return results of append_entries
+ae4_test_() ->
+    testme(?_test([
+                   ?assertEqual({1,true},append_entries(raft1,1,0,0,[{1,newdata}],0)),
+                   ?assertEqual({2,true},append_entries(raft1,2,1,1,[{2,newdata2}],0)),
+                   ?assertEqual(2,get_term(raft1)),
+                   ?assertEqual([{1,newdata},{2,newdata2}],get_log(raft1)),
+                   ?assertEqual({2,false},append_entries(raft1,1,1,1,[{1,otherdata}],0)),
+                   ?assertEqual(2,get_term(raft1)),
+                   ?assertEqual([{1,newdata},{2,newdata2}],get_log(raft1))
+             ])).
 
-%% % case 5: 2 different data but second is ignored because prev stuf does not match the stored data
-%% ae5_test_() ->
-%%     testme(?_test([
-%%                    ?assertEqual({1,true},append_entries(raft1,1,0,0,[{1,newdata}],0)),
-%%                    ?assertEqual(1,get_term(raft1)),
-%%                    ?assertEqual(0,get_commit_index(raft1)),
-%%                    ?assertEqual([{1,newdata}],get_log(raft1)),
-%%                    ?assertEqual({2,false},append_entries(raft1,2,5,1,[{2,newdata2}],0)), % some index in term 1 we have not seen
-%%                    ?assertEqual({2,false},append_entries(raft1,2,1,2,[{2,newdata2}],0)), % first entry is term 2 rather than term 1
-%%                    ?assertEqual(2,get_term(raft1)),
-%%                    ?assertEqual(0,get_commit_index(raft1)),
-%%                    ?assertEqual([{1,newdata}],get_log(raft1))                   
-%%              ])).
+% case 5: 2 different data but second is ignored because prev stuf does not match the stored data
+ae5_test_() ->
+    testme(?_test([
+                   ?assertEqual({1,true},append_entries(raft1,1,0,0,[{1,newdata}],0)),
+                   ?assertEqual(1,get_term(raft1)),
+                   ?assertEqual(0,get_commit_index(raft1)),
+                   ?assertEqual([{1,newdata}],get_log(raft1)),
+                   ?assertEqual({2,false},append_entries(raft1,2,5,1,[{2,newdata2}],0)), % some index in term 1 we have not seen
+                   ?assertEqual([{1,newdata}],get_log(raft1)),
+                   ?assertEqual({2,false},append_entries(raft1,2,1,2,[{2,newdata2}],0)), % first entry is term 2 rather than term 1
+                   ?assertEqual(2,get_term(raft1)),
+                   ?assertEqual(0,get_commit_index(raft1)),
+                   ?assertEqual([{1,newdata}],get_log(raft1))                   
+             ])).
 
 
 
